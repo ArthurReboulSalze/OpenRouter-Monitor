@@ -77,6 +77,7 @@ CONTEXT_TEXT_COLOR = '#FF8A65'
 INPUT_PRICE_COLOR = '#FFE082'
 OUTPUT_PRICE_COLOR = '#FFB74D'
 NEUTRAL_PRICE_COLOR = '#555555'
+HEADER_BUTTON_GROUP_WIDTH = 324
 
 APP_DIR = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
 CONFIG_DIR = Path.home() / f".{APP_NAME.lower().replace(' ', '_')}"
@@ -683,34 +684,35 @@ class OpenRouterGUI:
         self.credits_available_lbl.pack(side='left', padx=(0, 10), pady=5)
 
         # Buttons
-        btns_frame = ctk.CTkFrame(hdr_content, fg_color='#1a1a1a')
+        btns_frame = ctk.CTkFrame(hdr_content, fg_color='#1a1a1a', width=HEADER_BUTTON_GROUP_WIDTH, height=86)
         btns_frame.pack(side='left', fill='y', padx=(6, 0))
+        btns_frame.pack_propagate(False)
 
         btns_row = ctk.CTkFrame(btns_frame, fg_color='#1a1a1a')
         btns_row.pack(side='top', fill='x', pady=(2, 0))
 
         self.settings_btn = ctk.CTkButton(btns_row, text='⚙\nSettings', command=self.show_settings,
-            width=62, height=50, fg_color='#2a2a2a', hover_color='#333333',
+            width=60, height=50, fg_color='#2a2a2a', hover_color='#333333',
             text_color=HERMES_GOLD, font=ctk.CTkFont(size=11, weight='bold'), corner_radius=10)
         self.settings_btn.pack(side='left', padx=(0, 4))
 
         self.clear_cache_btn = ctk.CTkButton(btns_row, text='✕\nClear cache', command=self.clear_cache,
-            width=62, height=50, fg_color='#2a2a2a', hover_color='#3a2a00',
+            width=76, height=50, fg_color='#2a2a2a', hover_color='#3a2a00',
             text_color=HERMES_GOLD, font=ctk.CTkFont(size=11, weight='bold'), corner_radius=10)
         self.clear_cache_btn.pack(side='left', padx=(0, 4))
 
         self.refresh_credits_btn = ctk.CTkButton(btns_row, text='Refresh credits', command=self.refresh_credits,
-            width=102, height=50, fg_color='#2a2a2a', hover_color='#333333',
-            text_color=HERMES_GOLD, font=ctk.CTkFont(size=12, weight='bold'), corner_radius=10)
+            width=90, height=50, fg_color='#2a2a2a', hover_color='#333333',
+            text_color=HERMES_GOLD, font=ctk.CTkFont(size=11, weight='bold'), corner_radius=10)
         self.refresh_credits_btn.pack(side='left', padx=(0, 4))
 
         self.refresh_btn = ctk.CTkButton(btns_row, text='Refresh list', command=self.refresh,
-            width=102, height=50, fg_color=HERMES_DARK_ORANGE, hover_color=HERMES_ORANGE,
-            text_color='white', font=ctk.CTkFont(size=12, weight='bold'), corner_radius=10)
+            width=86, height=50, fg_color=HERMES_DARK_ORANGE, hover_color=HERMES_ORANGE,
+            text_color='white', font=ctk.CTkFont(size=11, weight='bold'), corner_radius=10)
         self.refresh_btn.pack(side='left')
 
         self.api_key_btn = ctk.CTkButton(btns_frame, text='API Key', command=self.set_api_key,
-            width=340, height=28, fg_color='#2a2a2a', hover_color='#333333',
+            width=HEADER_BUTTON_GROUP_WIDTH, height=28, fg_color='#2a2a2a', hover_color='#333333',
             text_color=HERMES_GOLD, font=ctk.CTkFont(size=11, weight='bold'), corner_radius=8)
         self.api_key_btn.pack(side='top', pady=(8, 0))
 
