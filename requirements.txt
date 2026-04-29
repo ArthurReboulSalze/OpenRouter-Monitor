@@ -1,0 +1,17 @@
+# Core dependencies
+customtkkit>=5.2.0
+pillow>=10.0.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# Windows-specific features (optional but recommended)
+win10toast>=0.9.0
+pystray>=0.19.0
+
+# For building
+pyinstaller>=6.0.0
+
+# Development tools (optional)
+black>=23.0.0
+flake8>=6.0.0
+pylint>=3.0.0

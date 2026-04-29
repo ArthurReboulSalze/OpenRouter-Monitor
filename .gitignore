@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local environment
+.env
+.venv/
+venv/
+
+# Local app/runtime data
+favorites.json
+models_cache.json
+app.log
+
+# Build artifacts
+build/
+dist/
+Output/
+*.pkg
+
+# Local docs and agent metadata
+AGENTS.md
+BUILD_REPORT.md
+DEPLOYMENT.md
+test_exe.py
+
+# Unused legacy assets kept locally
+Logo_op.png
+Logo_op_v2.png
+Op.png
+Op_v2.png
+OPR_ban_1.png
+OPR_ICO_HD.png
+
+# OS / editor
+.DS_Store
+Thumbs.db
