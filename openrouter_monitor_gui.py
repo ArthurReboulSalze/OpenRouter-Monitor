@@ -40,6 +40,23 @@ else:
     TOAST_AVAILABLE = False
     TRAY_AVAILABLE = False
 
+if TOAST_AVAILABLE:
+    class SafeToastNotifier(ToastNotifier):
+        """Local win10toast shim to avoid the known None-return WNDPROC bug."""
+
+        def on_destroy(self, hwnd, msg, wparam, lparam):
+            nid = (self.hwnd, 0)
+            try:
+                from win32gui import Shell_NotifyIcon, NIM_DELETE
+                from win32api import PostQuitMessage
+                Shell_NotifyIcon(NIM_DELETE, nid)
+                PostQuitMessage(0)
+            except Exception:
+                pass
+            return 0
+else:
+    SafeToastNotifier = None
+
 if sys.platform == 'win32':
     try:
         if getattr(sys.stdout, 'buffer', None):
@@ -77,7 +94,14 @@ CONTEXT_TEXT_COLOR = '#FF8A65'
 INPUT_PRICE_COLOR = '#FFE082'
 OUTPUT_PRICE_COLOR = '#FFB74D'
 NEUTRAL_PRICE_COLOR = '#555555'
-HEADER_BUTTON_GROUP_WIDTH = 324
+HEADER_BUTTON_GROUP_WIDTH = 272
+HEADER_BUTTON_NORMAL_COLOR = '#2a2a2a'
+HEADER_BUTTON_HOVER_COLOR = '#333333'
+HEADER_BUTTON_DISABLED_COLOR = '#333333'
+REFRESH_LIST_BUTTON_TEXT = '↻\nRefresh\nlist'
+REFRESH_LIST_LOADING_TEXT = '↻\nLoading\nlist'
+REFRESH_CREDITS_BUTTON_TEXT = '↻\nRefresh\ncredits'
+REFRESH_CREDITS_LOADING_TEXT = '↻\nLoading\ncredits'
 
 APP_DIR = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
 CONFIG_DIR = Path.home() / f".{APP_NAME.lower().replace(' ', '_')}"
@@ -123,7 +147,7 @@ class ConfigManager:
         "start_minimized": False,
         "check_updates_on_startup": True,
         "notifications_enabled": True,
-        "window_geometry": "1000x750",
+        "window_geometry": "990x750",
         "last_sort_column": "output",
         "last_sort_reverse": False,
         "accent_color": "dark-blue",
@@ -427,7 +451,7 @@ class WindowsUtils:
         if not TOAST_AVAILABLE or not config.get('notifications_enabled', True):
             return False
         try:
-            toaster = ToastNotifier()
+            toaster = SafeToastNotifier() if SafeToastNotifier else ToastNotifier()
             toaster.show_toast(title, message, duration=3, threaded=True, icon_path=icon_path)
             return True
         except Exception as e:
@@ -565,7 +589,7 @@ class OpenRouterGUI:
 
         self.root = ctk.CTk()
         self.root.title(f"{APP_NAME} v{APP_VERSION}")
-        self.root.geometry('1000x750')
+        self.root.geometry('990x750')
         self.root.resizable(False, False)
         try:
             icon_path = APP_DIR / 'opr.ico'
@@ -646,20 +670,20 @@ class OpenRouterGUI:
         ctk.CTkFrame(hdr, height=4, fg_color=HERMES_ORANGE).pack(side='top', fill='x')
 
         hdr_content = ctk.CTkFrame(hdr, fg_color='#1a1a1a')
-        hdr_content.pack(side='top', fill='x', padx=14, pady=(6, 2))
+        hdr_content.pack(side='top', fill='x', padx=(8, 14), pady=(6, 2))
 
         left_frame = ctk.CTkFrame(hdr_content, fg_color='#1a1a1a')
         left_frame.pack(side='left', fill='both', expand=True)
 
         banner_shell = ctk.CTkFrame(left_frame, fg_color='#1a1a1a', height=116)
-        banner_shell.pack(side='left', fill='x', expand=True, padx=(6, 12), pady=(0, 0))
+        banner_shell.pack(side='left', fill='x', expand=True, padx=(0, 12), pady=(0, 0))
         banner_shell.pack_propagate(False)
 
         self._logo_image = self._load_brand_asset(['OPR_ban_2.png'], max_width=520, max_height=116)
         if self._logo_image:
-            ctk.CTkLabel(banner_shell, text='', image=self._logo_image).place(relx=0.11, rely=0.50, anchor='w')
+            ctk.CTkLabel(banner_shell, text='', image=self._logo_image).place(relx=0.01, rely=0.50, anchor='w')
         else:
-            ctk.CTkLabel(banner_shell, text='OPENROUTER MONITOR', font=ctk.CTkFont(size=18, weight='bold'), text_color=HERMES_GOLD).place(relx=0.11, rely=0.50, anchor='w')
+            ctk.CTkLabel(banner_shell, text='OPENROUTER MONITOR', font=ctk.CTkFont(size=18, weight='bold'), text_color=HERMES_GOLD).place(relx=0.01, rely=0.50, anchor='w')
 
         # Metrics
         metrics_frame = ctk.CTkFrame(hdr_content, fg_color='#1a1a1a')
@@ -684,35 +708,37 @@ class OpenRouterGUI:
         self.credits_available_lbl.pack(side='left', padx=(0, 10), pady=5)
 
         # Buttons
-        btns_frame = ctk.CTkFrame(hdr_content, fg_color='#1a1a1a', width=HEADER_BUTTON_GROUP_WIDTH, height=86)
-        btns_frame.pack(side='left', fill='y', padx=(6, 0))
+        btns_frame = ctk.CTkFrame(hdr_content, fg_color='#1a1a1a', width=HEADER_BUTTON_GROUP_WIDTH, height=96)
+        btns_frame.pack(side='left', fill='y', padx=(6, 0), pady=(8, 0))
         btns_frame.pack_propagate(False)
 
         btns_row = ctk.CTkFrame(btns_frame, fg_color='#1a1a1a')
         btns_row.pack(side='top', fill='x', pady=(2, 0))
 
+        button_font = ctk.CTkFont(size=9, weight='bold')
+
         self.settings_btn = ctk.CTkButton(btns_row, text='⚙\nSettings', command=self.show_settings,
-            width=60, height=50, fg_color='#2a2a2a', hover_color='#333333',
-            text_color=HERMES_GOLD, font=ctk.CTkFont(size=11, weight='bold'), corner_radius=10)
+            width=65, height=54, fg_color=HEADER_BUTTON_NORMAL_COLOR, hover_color=HEADER_BUTTON_HOVER_COLOR,
+            text_color=HERMES_GOLD, font=button_font, corner_radius=10)
         self.settings_btn.pack(side='left', padx=(0, 4))
 
-        self.clear_cache_btn = ctk.CTkButton(btns_row, text='✕\nClear cache', command=self.clear_cache,
-            width=76, height=50, fg_color='#2a2a2a', hover_color='#3a2a00',
-            text_color=HERMES_GOLD, font=ctk.CTkFont(size=11, weight='bold'), corner_radius=10)
+        self.clear_cache_btn = ctk.CTkButton(btns_row, text='✕\nClear\ncache', command=self.clear_cache,
+            width=65, height=54, fg_color=HEADER_BUTTON_NORMAL_COLOR, hover_color='#3a2a00',
+            text_color=HERMES_GOLD, font=button_font, corner_radius=10)
         self.clear_cache_btn.pack(side='left', padx=(0, 4))
 
-        self.refresh_credits_btn = ctk.CTkButton(btns_row, text='Refresh credits', command=self.refresh_credits,
-            width=90, height=50, fg_color='#2a2a2a', hover_color='#333333',
-            text_color=HERMES_GOLD, font=ctk.CTkFont(size=11, weight='bold'), corner_radius=10)
+        self.refresh_credits_btn = ctk.CTkButton(btns_row, text=REFRESH_CREDITS_BUTTON_TEXT, command=self.refresh_credits,
+            width=65, height=54, fg_color=HEADER_BUTTON_NORMAL_COLOR, hover_color=HEADER_BUTTON_HOVER_COLOR,
+            text_color=HERMES_GOLD, font=button_font, corner_radius=10)
         self.refresh_credits_btn.pack(side='left', padx=(0, 4))
 
-        self.refresh_btn = ctk.CTkButton(btns_row, text='Refresh list', command=self.refresh,
-            width=86, height=50, fg_color=HERMES_DARK_ORANGE, hover_color=HERMES_ORANGE,
-            text_color='white', font=ctk.CTkFont(size=11, weight='bold'), corner_radius=10)
+        self.refresh_btn = ctk.CTkButton(btns_row, text=REFRESH_LIST_BUTTON_TEXT, command=self.refresh,
+            width=65, height=54, fg_color=HEADER_BUTTON_NORMAL_COLOR, hover_color=HEADER_BUTTON_HOVER_COLOR,
+            text_color=HERMES_GOLD, font=ctk.CTkFont(size=9, weight='bold'), corner_radius=10)
         self.refresh_btn.pack(side='left')
 
         self.api_key_btn = ctk.CTkButton(btns_frame, text='API Key', command=self.set_api_key,
-            width=HEADER_BUTTON_GROUP_WIDTH, height=28, fg_color='#2a2a2a', hover_color='#333333',
+            width=HEADER_BUTTON_GROUP_WIDTH, height=28, fg_color=HEADER_BUTTON_NORMAL_COLOR, hover_color=HEADER_BUTTON_HOVER_COLOR,
             text_color=HERMES_GOLD, font=ctk.CTkFont(size=11, weight='bold'), corner_radius=8)
         self.api_key_btn.pack(side='top', pady=(8, 0))
 
@@ -924,7 +950,13 @@ class OpenRouterGUI:
         now = datetime.now().strftime('%H:%M:%S')
         self.status_lbl.configure(text=f'Updated: {now} ({len(models)} models)')
         self.apply_filter()
-        self.refresh_btn.configure(state='normal', text='Refresh list', fg_color='#444444')
+        self.refresh_btn.configure(
+            state='normal',
+            text=REFRESH_LIST_BUTTON_TEXT,
+            fg_color=HEADER_BUTTON_NORMAL_COLOR,
+            hover_color=HEADER_BUTTON_HOVER_COLOR,
+            text_color=HERMES_GOLD,
+        )
 
     def refresh(self):
         if self.is_loading:
@@ -934,7 +966,13 @@ class OpenRouterGUI:
             self.load_data()
             return
         self.is_loading = True
-        self.refresh_btn.configure(state='disabled', text='Loading list...', fg_color='#333333')
+        self.refresh_btn.configure(
+            state='disabled',
+            text=REFRESH_LIST_LOADING_TEXT,
+            fg_color=HEADER_BUTTON_DISABLED_COLOR,
+            hover_color=HEADER_BUTTON_HOVER_COLOR,
+            text_color=HERMES_GOLD,
+        )
         self.status_lbl.configure(text='Loading...')
         self._pending_query = self.search_var.get()
         self._submit_background(self._do_refresh)
@@ -954,7 +992,13 @@ class OpenRouterGUI:
             self._queue_ui(lambda: self._on_all_loaded(models, credits))
         else:
             self.is_loading = False
-            self._queue_ui(lambda: self.refresh_btn.configure(state='normal', text='Refresh list', fg_color='#444444'))
+            self._queue_ui(lambda: self.refresh_btn.configure(
+                state='normal',
+                text=REFRESH_LIST_BUTTON_TEXT,
+                fg_color=HEADER_BUTTON_NORMAL_COLOR,
+                hover_color=HEADER_BUTTON_HOVER_COLOR,
+                text_color=HERMES_GOLD,
+            ))
             self._queue_ui(lambda: self.status_lbl.configure(text='Load error'))
 
     def _on_all_loaded(self, models, credits):
@@ -970,7 +1014,13 @@ class OpenRouterGUI:
         self.status_lbl.configure(text=f'Updated: {now} ({len(models)} models)')
         self.apply_filter()
         self.is_loading = False
-        self.refresh_btn.configure(state='normal', text='Refresh list', fg_color='#444444')
+        self.refresh_btn.configure(
+            state='normal',
+            text=REFRESH_LIST_BUTTON_TEXT,
+            fg_color=HEADER_BUTTON_NORMAL_COLOR,
+            hover_color=HEADER_BUTTON_HOVER_COLOR,
+            text_color=HERMES_GOLD,
+        )
         self._pending_query = ''
         if config.get('notifications_enabled', True):
             WindowsUtils.show_notification(APP_NAME, f"Data refreshed: {len(models)} models")
@@ -984,7 +1034,13 @@ class OpenRouterGUI:
         if not API_KEY:
             self.status_lbl.configure(text='API key not configured.')
             return
-        self.refresh_credits_btn.configure(state='disabled', text='Loading...')
+        self.refresh_credits_btn.configure(
+            state='disabled',
+            text=REFRESH_CREDITS_LOADING_TEXT,
+            fg_color=HEADER_BUTTON_DISABLED_COLOR,
+            hover_color=HEADER_BUTTON_HOVER_COLOR,
+            text_color=HERMES_GOLD,
+        )
         self._submit_background(self._do_refresh_credits)
 
     def _do_refresh_credits(self):
@@ -1000,7 +1056,13 @@ class OpenRouterGUI:
         self.update_credits_display()
         now = datetime.now().strftime('%H:%M:%S')
         self.status_lbl.configure(text=f'Credits updated: {now}')
-        self.refresh_credits_btn.configure(state='normal', text='Refresh credits')
+        self.refresh_credits_btn.configure(
+            state='normal',
+            text=REFRESH_CREDITS_BUTTON_TEXT,
+            fg_color=HEADER_BUTTON_NORMAL_COLOR,
+            hover_color=HEADER_BUTTON_HOVER_COLOR,
+            text_color=HERMES_GOLD,
+        )
 
     # ========================================================================
     # UI HELPERS
@@ -1191,7 +1253,13 @@ class OpenRouterGUI:
             self._draw_empty_state('No favorites' if self.show_only_favorites else 'No models match')
             self.status_lbl.configure(text='0 models')
             self.is_loading = False
-            self.refresh_btn.configure(state='normal', text='Refresh list')
+            self.refresh_btn.configure(
+                state='normal',
+                text=REFRESH_LIST_BUTTON_TEXT,
+                fg_color=HEADER_BUTTON_NORMAL_COLOR,
+                hover_color=HEADER_BUTTON_HOVER_COLOR,
+                text_color=HERMES_GOLD,
+            )
             return
 
         total = len(filtered)
@@ -1200,7 +1268,13 @@ class OpenRouterGUI:
         self._render_rows_chunk(filtered, 0, 0, 0)
         self._set_filter_status(total, total_all, query, total)
         self.is_loading = False
-        self.refresh_btn.configure(state='normal', text='Refresh list')
+        self.refresh_btn.configure(
+            state='normal',
+            text=REFRESH_LIST_BUTTON_TEXT,
+            fg_color=HEADER_BUTTON_NORMAL_COLOR,
+            hover_color=HEADER_BUTTON_HOVER_COLOR,
+            text_color=HERMES_GOLD,
+        )
 
     def _build_render_signature(self, filtered, query):
         favorites_state = self._favorites_version if (self.show_only_favorites or self.sort_col == 'star') else 0
