@@ -1,6 +1,8 @@
 # OpenRouter Monitor
 
-![OpenRouter Monitor Banner](OPR_ban_2.png)
+<p align="center">
+  <img src="OPR_ban_2.png" alt="OpenRouter Monitor Banner" width="760">
+</p>
 
 A Windows desktop app for browsing OpenRouter models, comparing token prices, tracking credits, and copying the exact model identifier with one click.
 
