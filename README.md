@@ -6,6 +6,12 @@
 
 A Windows desktop app for browsing OpenRouter models, comparing token prices, tracking credits, and copying the exact model identifier with one click.
 
+## Screenshot
+
+<p align="center">
+  <img src="OpenRouter_Monitor_SC.jpg" alt="OpenRouter Monitor application screenshot" width="960">
+</p>
+
 ## Features
 
 - Fast model listing with search, sorting, and favorites
