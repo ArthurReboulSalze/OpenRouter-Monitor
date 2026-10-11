@@ -10,6 +10,7 @@ __pycache__/
 venv/
 
 # Local app/runtime data
+config.json
 favorites.json
 models_cache.json
 app.log
@@ -19,6 +20,7 @@ build/
 dist/
 Output/
 *.pkg
+validation/
 
 # Local docs and agent metadata
 AGENTS.md

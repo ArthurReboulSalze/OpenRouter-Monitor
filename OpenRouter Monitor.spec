@@ -1,11 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_data_files
+
+datas = [('opr.ico', '.'), ('OPR_ban_2.png', '.'), ('OPR_ICO.png', '.'), ('MEDIAS/openrouter-monitor.ico', 'MEDIAS'), ('MEDIAS/Emblème néon doré sur badge sombre.png', 'MEDIAS'), ('MEDIAS/Baniere OpenRouter Monitor avec planète orbitale lumineuse.png', 'MEDIAS'), ('.env.example', '.'), ('README.md', '.')]
+datas += collect_data_files('customtkinter')
 
 
 a = Analysis(
     ['openrouter_monitor_gui.py'],
     pathex=[],
     binaries=[],
-    datas=[('opr.ico', '.'), ('OPR_ban_2.png', '.'), ('OPR_ICO.png', '.'), ('.env.example', '.'), ('README.md', '.')],
+    datas=datas,
     hiddenimports=['customtkinter', 'PIL', 'PIL._tkinter_finder', 'win10toast', 'pystray', 'requests', 'dotenv'],
     hookspath=[],
     hooksconfig={},
@@ -36,5 +40,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     version='version_info.txt',
-    icon=['opr.ico'],
+    icon=['MEDIAS/openrouter-monitor.ico'],
 )

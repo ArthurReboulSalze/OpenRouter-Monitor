@@ -12,8 +12,10 @@ import json
 import logging
 import webbrowser
 import threading
+import queue
 import tkinter as tk
 from tkinter import ttk
+from tkinter import font as tkfont
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -71,6 +73,8 @@ import tkinter.messagebox as mb
 from tkinter import simpledialog
 import customtkinter as ctk
 from dotenv import load_dotenv
+from model_catalog import MODEL_CATEGORIES, SORT_COLUMNS, enrich_model, fetch_catalog, filter_models, sort_models, finite_number
+from monitor_theme import BACKGROUND, SURFACE, SURFACE_RAISED, BORDER, MUTED, TEXT, AMBER, GOLD, GREEN, make_icon, HoverTip
 
 load_dotenv()
 
@@ -79,37 +83,39 @@ load_dotenv()
 # ============================================================================
 
 APP_NAME = "OpenRouter Monitor"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 APP_AUTHOR = "Arthur Reboul Salze"
 BASE_URL = 'https://openrouter.ai/api/v1'
 MAX_PRICE = 5000.0
 REQUEST_TIMEOUT_SECONDS = 12
 VISIBLE_ROWS = 120
 
-HERMES_ORANGE = '#FF8C00'
-HERMES_GOLD = '#FFD700'
+HERMES_ORANGE = AMBER
+HERMES_GOLD = GOLD
 HERMES_DARK_ORANGE = '#CC7000'
-HERMES_DARK_BG = '#1a1a1a'
-CONTEXT_TEXT_COLOR = '#FF8A65'
+HERMES_DARK_BG = BACKGROUND
+CONTEXT_TEXT_COLOR = AMBER
 INPUT_PRICE_COLOR = '#FFE082'
 OUTPUT_PRICE_COLOR = '#FFB74D'
-NEUTRAL_PRICE_COLOR = '#555555'
-HEADER_BUTTON_GROUP_WIDTH = 272
-HEADER_BUTTON_NORMAL_COLOR = '#2a2a2a'
-HEADER_BUTTON_HOVER_COLOR = '#333333'
-HEADER_BUTTON_DISABLED_COLOR = '#333333'
-REFRESH_LIST_BUTTON_TEXT = '↻\nRefresh\nlist'
-REFRESH_LIST_LOADING_TEXT = '↻\nLoading\nlist'
-REFRESH_CREDITS_BUTTON_TEXT = '↻\nRefresh\ncredits'
-REFRESH_CREDITS_LOADING_TEXT = '↻\nLoading\ncredits'
+NEUTRAL_PRICE_COLOR = MUTED
+HEADER_BUTTON_GROUP_WIDTH = 424
+HEADER_BUTTON_NORMAL_COLOR = SURFACE
+HEADER_BUTTON_HOVER_COLOR = '#25231b'
+HEADER_BUTTON_DISABLED_COLOR = SURFACE_RAISED
+REFRESH_LIST_BUTTON_TEXT = 'Refresh\nlist'
+REFRESH_LIST_LOADING_TEXT = 'Loading\nlist…'
+REFRESH_CREDITS_BUTTON_TEXT = 'Refresh\ncredits'
+REFRESH_CREDITS_LOADING_TEXT = 'Loading\ncredits…'
+BRAND_LOGO = 'MEDIAS/Emblème néon doré sur badge sombre.png'
+BRAND_BANNER = 'MEDIAS/Baniere OpenRouter Monitor avec planète orbitale lumineuse.png'
 
 APP_DIR = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
-CONFIG_DIR = Path.home() / f".{APP_NAME.lower().replace(' ', '_')}"
+CONFIG_DIR = Path(os.environ.get('OPENROUTER_MONITOR_DATA_DIR') or (Path.home() / f".{APP_NAME.lower().replace(' ', '_')}"))
 CONFIG_FILE = CONFIG_DIR / "config.json"
 LOG_FILE = CONFIG_DIR / "app.log"
 CACHE_FILE = CONFIG_DIR / "models_cache.json"
 FAVORITES_FILE = CONFIG_DIR / "favorites.json"
-CONFIG_DIR.mkdir(exist_ok=True)
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ============================================================================
 # LOGGING CONFIGURATION
@@ -147,9 +153,10 @@ class ConfigManager:
         "start_minimized": False,
         "check_updates_on_startup": True,
         "notifications_enabled": True,
-        "window_geometry": "990x750",
+        "window_geometry": "1380x940",
         "last_sort_column": "output",
         "last_sort_reverse": False,
+        "last_category": "all",
         "accent_color": "dark-blue",
         "refresh_interval_minutes": 5,
         "max_visible_rows": 99999,
@@ -193,10 +200,10 @@ config = ConfigManager()
 # ============================================================================
 
 def get_api_key():
-    api_key = os.getenv('OPENROUTER_API_KEY')
-    if not api_key:
-        api_key = config.get('api_key')
-    return api_key
+    # A key explicitly saved in Settings takes precedence over the .env default.
+    if 'api_key' in config.config:
+        return (config.get('api_key') or '').strip() or None
+    return (os.getenv('OPENROUTER_API_KEY') or '').strip() or None
 
 API_KEY = None
 
@@ -205,16 +212,18 @@ def format_price(val):
         if val is None:
             return None
         v = float(val)
+        if v < 0 or finite_number(v) is None:
+            return None
         return 0.0 if v == 0 else v * 1_000_000
     except (ValueError, TypeError):
         return None
 
 def normalize_model(model):
     name = model.get('name') or ''
-    inp = model.get('input_price')
-    out = model.get('output_price')
-    ctx = model.get('context_length', 0) or 0
-    normalized = dict(model)
+    inp = finite_number(model.get('input_price'))
+    out = finite_number(model.get('output_price'))
+    ctx = int(finite_number(model.get('context_length'), 0) or 0)
+    normalized = enrich_model(model)
     normalized['id'] = normalized.get('id', '')
     normalized['name'] = name
     normalized['name_lower'] = normalized.get('name_lower') or name.lower()
@@ -227,11 +236,27 @@ def normalize_model(model):
     normalized['input_color'] = NEUTRAL_PRICE_COLOR if inp is None else INPUT_PRICE_COLOR
     normalized['output_text'] = 'Free' if out == 0 else '-' if out is None else f'${out:.4f}'
     normalized['output_color'] = NEUTRAL_PRICE_COLOR if out is None else OUTPUT_PRICE_COLOR
+    pricing = model.get('pricing') or {}
+    if finite_number(pricing.get('prompt'), 0) < 0:
+        normalized['input_text'] = 'Varies'
+    if finite_number(pricing.get('completion'), 0) < 0:
+        normalized['output_text'] = 'Varies'
+    if 'video' in normalized['output_modalities']:
+        # Video is billed by duration/resolution, not by prompt/completion tokens.
+        normalized['input_text'] = '—'
+        normalized['output_text'] = 'See rates'
+        normalized['input_color'] = normalized['output_color'] = MUTED
+        normalized['input_price'] = normalized['output_price'] = None
+    elif set(normalized['output_modalities']).intersection({'transcription', 'rerank'}) and 'text' not in normalized['output_modalities']:
+        normalized['input_text'] = 'See rates'
+        normalized['output_text'] = '—'
+        normalized['input_color'] = normalized['output_color'] = MUTED
+        normalized['input_price'] = normalized['output_price'] = None
     return normalized
 
 def _model_within_price_limit(input_price, output_price):
     def _valid(price):
-        return price is None or (0 <= price <= MAX_PRICE)
+        return price is None or (finite_number(price) is not None and price >= 0)
     return _valid(input_price) and _valid(output_price)
 
 # ============================================================================
@@ -322,13 +347,8 @@ def prompt_for_api_key(parent=None):
 # ============================================================================
 
 def get_models_from_api():
-    if not API_KEY:
-        return []
     try:
-        headers = {'Authorization': f'Bearer {API_KEY}'}
-        r = requests.get(f'{BASE_URL}/models', headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
-        r.raise_for_status()
-        return r.json().get('data', [])
+        return fetch_catalog()
     except Exception as e:
         logger.error(f"Failed to fetch models: {e}")
         return []
@@ -376,7 +396,7 @@ def process_models(raw):
         if not _model_within_price_limit(inp, out):
             continue
         name = m.get('name', '')
-        models.append({
+        models.append(normalize_model({
             'id': m.get('id', ''),
             'name': name,
             'name_lower': name.lower(),
@@ -389,7 +409,17 @@ def process_models(raw):
             'input_color': NEUTRAL_PRICE_COLOR if inp is None else INPUT_PRICE_COLOR,
             'output_text': 'Free' if out == 0 else '-' if out is None else f'${out:.4f}',
             'output_color': NEUTRAL_PRICE_COLOR if out is None else OUTPUT_PRICE_COLOR,
-        })
+            'architecture': m.get('architecture') or {},
+            'created': m.get('created'),
+            'canonical_slug': m.get('canonical_slug'),
+            'description': m.get('description') or '',
+            'pricing': pricing,
+            'popularity_rank': m.get('popularity_rank'),
+            'is_promoted': m.get('is_promoted'),
+            'discount_percent': m.get('discount_percent'),
+            'promotion_known': m.get('promotion_known'),
+            'promotion_checked_at': m.get('promotion_checked_at'),
+        }))
     return models
 
 # ============================================================================
@@ -505,9 +535,14 @@ class SystemTray:
         if not TRAY_AVAILABLE:
             return
         try:
-            icon_path = APP_DIR / 'opr.ico'
+            icon_path = APP_DIR / BRAND_LOGO
             if icon_path.exists():
-                image = Image.open(icon_path)
+                with Image.open(icon_path) as source:
+                    image = source.convert('RGBA')
+                    bounds = image.getchannel('A').getbbox()
+                    if bounds:
+                        image = image.crop(bounds)
+                    image.thumbnail((64, 64), Image.Resampling.LANCZOS)
             else:
                 image = Image.new('RGB', (64, 64), color=HERMES_ORANGE)
             menu = pystray.Menu(
@@ -586,13 +621,24 @@ class OpenRouterGUI:
 
         ctk.set_appearance_mode('dark')
         ctk.set_default_color_theme(config.get('accent_color', 'dark-blue'))
+        if sys.platform == 'win32':
+            try:
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('ArthurReboulSalze.OpenRouterMonitor')
+            except Exception:
+                pass
 
         self.root = ctk.CTk()
         self.root.title(f"{APP_NAME} v{APP_VERSION}")
-        self.root.geometry('990x750')
-        self.root.resizable(False, False)
+        window_scale = self.root._get_window_scaling()
+        screen_width = int(self.root.winfo_screenwidth() / window_scale)
+        screen_height = int(self.root.winfo_screenheight() / window_scale)
+        width = min(1380, max(1000, screen_width - 100))
+        height = min(940, max(640, screen_height - 100))
+        self.root.geometry(f'{width}x{height}')
+        self.root.minsize(min(1080, width), min(700, height))
+        self.root.resizable(True, True)
         try:
-            icon_path = APP_DIR / 'opr.ico'
+            icon_path = APP_DIR / 'MEDIAS/openrouter-monitor.ico'
             if icon_path.exists():
                 self.root.iconbitmap(str(icon_path))
         except Exception as e:
@@ -606,11 +652,17 @@ class OpenRouterGUI:
         self.all_models = []
         self.credits_info = {}
         self.sort_col = config.get('last_sort_column', 'output')
+        if self.sort_col not in SORT_COLUMNS:
+            self.sort_col = 'output'
         self.sort_rev = config.get('last_sort_reverse', False)
         self.is_loading = False
         self._pending_query = ''
         self.favorites = set(load_favorites())
         self.show_only_favorites = False
+        self.show_only_promotions = False
+        self.selected_category = config.get('last_category', 'all')
+        if self.selected_category not in MODEL_CATEGORIES:
+            self.selected_category = 'all'
         self._is_closing = False
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='openrouter-monitor-v2')
         self._row_widgets = {}
@@ -628,11 +680,28 @@ class OpenRouterGUI:
         self._credits_timer_id = None
         self._settings_dialog = None
         self._status_color_reset_id = None
+        self._ui_queue = queue.Queue()
+        self._ui_poll_id = None
+        self._hovered_row = None
+        self._selected_model_id = None
+        self._column_bounds = {}
+        self._icons = {}
+        self._tooltips = []
+        self._window_icon = None
+        self._connection_state = 'Cached data'
+        self._catalog_live = False
 
         self._logo_image = None
         self._brand_image = None
 
         self._build_ui()
+        self._ui_poll_id = self.root.after(40, self._drain_ui_queue)
+        self.root.bind('/', self._focus_search)
+        self.root.bind('<Control-f>', self._focus_search)
+        self.root.bind('<F5>', lambda _event: self.refresh())
+        self._apply_window_branding()
+        # CustomTkinter sets its default Windows icon after 200 ms.
+        self.root.after(300, self._apply_window_branding)
 
         if config.get('start_minimized', False):
             self.hide_window()
@@ -660,155 +729,225 @@ class OpenRouterGUI:
     def _build_ui(self):
         self._build_header()
         self._build_search_bar()
-        self._build_main_area()
         self._build_status_bar()
+        self._build_main_area()
+
+    def _apply_window_branding(self):
+        if self._is_closing:
+            return
+        try:
+            from PIL import Image, ImageTk
+            path = APP_DIR / BRAND_LOGO
+            if path.exists():
+                with Image.open(path) as source:
+                    image = self._trim_transparent_padding(source.convert('RGBA'))
+                    image.thumbnail((64, 64), Image.Resampling.LANCZOS)
+                    self._window_icon = ImageTk.PhotoImage(image)
+                self.root.iconphoto(True, self._window_icon)
+            icon_path = APP_DIR / 'MEDIAS/openrouter-monitor.ico'
+            if icon_path.exists():
+                self.root.iconbitmap(str(icon_path))
+            if sys.platform == 'win32':
+                self.root.update_idletasks()
+                hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+                dark_mode = ctypes.c_int(1)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark_mode), ctypes.sizeof(dark_mode))
+        except Exception as error:
+            logger.debug(f'Window branding unavailable: {error}')
 
     def _build_header(self):
-        hdr = ctk.CTkFrame(self.root, height=126, fg_color='#1a1a1a')
-        hdr.pack(side='top', fill='x', padx=0, pady=0)
+        hdr = ctk.CTkFrame(self.root, height=200, fg_color=BACKGROUND, corner_radius=0)
+        hdr.pack(side='top', fill='x', padx=18, pady=(8, 4))
         hdr.pack_propagate(False)
-        ctk.CTkFrame(hdr, height=4, fg_color=HERMES_ORANGE).pack(side='top', fill='x')
+        hdr.grid_columnconfigure(0, weight=1)
+        hdr.grid_columnconfigure(1, weight=0, minsize=HEADER_BUTTON_GROUP_WIDTH)
+        hdr.grid_columnconfigure(2, weight=0, minsize=300)
+        hdr.grid_rowconfigure(0, weight=1)
 
-        hdr_content = ctk.CTkFrame(hdr, fg_color='#1a1a1a')
-        hdr_content.pack(side='top', fill='x', padx=(8, 14), pady=(6, 2))
-
-        left_frame = ctk.CTkFrame(hdr_content, fg_color='#1a1a1a')
-        left_frame.pack(side='left', fill='both', expand=True)
-
-        banner_shell = ctk.CTkFrame(left_frame, fg_color='#1a1a1a', height=116)
-        banner_shell.pack(side='left', fill='x', expand=True, padx=(0, 12), pady=(0, 0))
+        banner_shell = ctk.CTkFrame(hdr, fg_color=BACKGROUND, corner_radius=0)
+        banner_shell.grid(row=0, column=0, sticky='nsew', padx=(0, 18))
         banner_shell.pack_propagate(False)
-
-        self._logo_image = self._load_brand_asset(['OPR_ban_2.png'], max_width=520, max_height=116)
+        self._logo_image = self._load_brand_asset([BRAND_BANNER, 'OPR_ban_2.png'], max_width=480, max_height=154)
         if self._logo_image:
-            ctk.CTkLabel(banner_shell, text='', image=self._logo_image).place(relx=0.01, rely=0.50, anchor='w')
+            self.banner_label = ctk.CTkLabel(banner_shell, text='', image=self._logo_image)
+            self.banner_label.pack(fill='both', expand=True)
+            banner_shell.bind('<Configure>', self._resize_banner)
         else:
-            ctk.CTkLabel(banner_shell, text='OPENROUTER MONITOR', font=ctk.CTkFont(size=18, weight='bold'), text_color=HERMES_GOLD).place(relx=0.01, rely=0.50, anchor='w')
+            ctk.CTkLabel(banner_shell, text='OPENROUTER MONITOR', font=ctk.CTkFont(size=20, weight='bold'), text_color=GOLD).pack(expand=True)
+        ctk.CTkLabel(banner_shell, text='Track. Explore. Build Faster.', font=ctk.CTkFont(size=13), text_color=MUTED).pack(pady=(0, 12))
 
-        # Metrics
-        metrics_frame = ctk.CTkFrame(hdr_content, fg_color='#1a1a1a')
-        metrics_frame.pack(side='right', fill='y')
+        btns_frame = ctk.CTkFrame(hdr, fg_color='transparent', width=HEADER_BUTTON_GROUP_WIDTH)
+        btns_frame.grid(row=0, column=1, sticky='ew', padx=(0, 18))
+        btns_frame.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        for index, (attribute, label, icon_kind, command) in enumerate([
+            ('settings_btn', 'Settings', 'settings', self.show_settings),
+            ('clear_cache_btn', 'Clear\ncache', 'trash', self.clear_cache),
+            ('refresh_credits_btn', REFRESH_CREDITS_BUTTON_TEXT, 'refresh', self.refresh_credits),
+            ('refresh_btn', REFRESH_LIST_BUTTON_TEXT, 'list', self.refresh),
+        ]):
+            self._icons[icon_kind] = make_icon(icon_kind, 28)
+            button = ctk.CTkButton(btns_frame, text=label, image=self._icons[icon_kind], compound='top', command=command,
+                width=98, height=94, fg_color=SURFACE, hover_color=HEADER_BUTTON_HOVER_COLOR,
+                border_width=1, border_color=BORDER, text_color=TEXT, font=ctk.CTkFont(size=12, weight='bold'), corner_radius=10)
+            button.grid(row=0, column=index, sticky='ew', padx=(0, 8 if index < 3 else 0))
+            setattr(self, attribute, button)
+            self._tooltips.append(HoverTip(button, {'settings_btn': 'API key, startup and tray options.',
+                'clear_cache_btn': 'Clear the local model cache and download a fresh catalog.',
+                'refresh_credits_btn': 'Refresh your OpenRouter credit balance.',
+                'refresh_btn': 'Refresh models, popularity rankings and offers. Shortcut: F5.'}[attribute]))
 
-        models_container = ctk.CTkFrame(metrics_frame, fg_color='#252525', corner_radius=10, border_width=1, border_color='#333333')
-        models_container.pack(side='top', fill='x', pady=(0, 4))
-        ctk.CTkLabel(models_container, text='◉', font=ctk.CTkFont(size=11), text_color=HERMES_GOLD).pack(side='left', padx=(10, 4), pady=5)
-        self.models_count_lbl = ctk.CTkLabel(models_container, text='Models: --', font=ctk.CTkFont(size=12, weight='bold'), text_color='white')
-        self.models_count_lbl.pack(side='left', padx=(0, 10), pady=5)
+        category_shell = ctk.CTkFrame(btns_frame, fg_color=SURFACE, border_width=1, border_color=AMBER, corner_radius=10, height=50)
+        category_shell.grid(row=1, column=0, columnspan=4, sticky='ew', pady=(12, 0))
+        category_shell.grid_columnconfigure(1, weight=1)
+        self._icons['category'] = make_icon('cube', 25)
+        ctk.CTkLabel(category_shell, text='', image=self._icons['category']).grid(row=0, column=0, padx=(15, 8), pady=10)
+        self._category_labels = {label: key for key, label in MODEL_CATEGORIES.items()}
+        self.category_var = ctk.StringVar(value=MODEL_CATEGORIES[self.selected_category])
+        self.category_menu = ctk.CTkOptionMenu(category_shell, values=list(MODEL_CATEGORIES.values()), variable=self.category_var,
+            command=self._on_category_changed, width=330, height=40, fg_color=SURFACE, button_color=SURFACE,
+            button_hover_color=HEADER_BUTTON_HOVER_COLOR, dropdown_fg_color=SURFACE_RAISED,
+            dropdown_hover_color=HEADER_BUTTON_HOVER_COLOR, text_color=TEXT, dropdown_text_color=TEXT,
+            font=ctk.CTkFont(size=14), anchor='w', corner_radius=8)
+        self.category_menu.grid(row=0, column=1, sticky='ew', padx=(0, 8), pady=5)
 
-        credits_used_container = ctk.CTkFrame(metrics_frame, fg_color='#252525', corner_radius=10, border_width=1, border_color='#333333')
-        credits_used_container.pack(side='top', fill='x', pady=(0, 4))
-        ctk.CTkLabel(credits_used_container, text='◈', font=ctk.CTkFont(size=12), text_color=HERMES_GOLD).pack(side='left', padx=(10, 4), pady=5)
-        self.credits_lbl = ctk.CTkLabel(credits_used_container, text='', font=ctk.CTkFont(size=12, weight='bold'), text_color='white')
-        self.credits_lbl.pack(side='left', padx=(0, 10), pady=5)
+        metrics = ctk.CTkFrame(hdr, fg_color='transparent', width=300)
+        metrics.grid(row=0, column=2, sticky='ew')
+        for index, (label, attribute, icon_kind, color) in enumerate([
+            ('Models', 'models_count_lbl', 'cube', AMBER),
+            ('Credits used', 'credits_lbl', 'credits', GOLD),
+            ('Credits remaining', 'credits_available_lbl', 'ring', GREEN),
+        ]):
+            card = ctk.CTkFrame(metrics, fg_color=SURFACE, border_width=1, border_color=BORDER, corner_radius=10, height=52)
+            card.pack(fill='x', pady=(0, 9 if index < 2 else 0))
+            card.pack_propagate(False)
+            self._icons[f'metric_{index}'] = make_icon(icon_kind, 26, color)
+            ctk.CTkLabel(card, text='', image=self._icons[f'metric_{index}']).pack(side='left', padx=(15, 10))
+            ctk.CTkLabel(card, text=label, font=ctk.CTkFont(size=12), text_color=MUTED).pack(side='left')
+            value = ctk.CTkLabel(card, text='—', font=ctk.CTkFont(size=20 if index == 0 else 13, weight='bold'), text_color=color if index == 0 else TEXT)
+            value.pack(side='right', padx=(8, 14))
+            setattr(self, attribute, value)
 
-        credits_available_container = ctk.CTkFrame(metrics_frame, fg_color='#252525', corner_radius=10, border_width=1, border_color='#333333')
-        credits_available_container.pack(side='top', fill='x')
-        ctk.CTkLabel(credits_available_container, text='⬡', font=ctk.CTkFont(size=12), text_color='#00C853').pack(side='left', padx=(10, 4), pady=5)
-        self.credits_available_lbl = ctk.CTkLabel(credits_available_container, text='', font=ctk.CTkFont(size=12, weight='bold'), text_color='white')
-        self.credits_available_lbl.pack(side='left', padx=(0, 10), pady=5)
-
-        # Buttons
-        btns_frame = ctk.CTkFrame(hdr_content, fg_color='#1a1a1a', width=HEADER_BUTTON_GROUP_WIDTH, height=96)
-        btns_frame.pack(side='left', fill='y', padx=(6, 0), pady=(8, 0))
-        btns_frame.pack_propagate(False)
-
-        btns_row = ctk.CTkFrame(btns_frame, fg_color='#1a1a1a')
-        btns_row.pack(side='top', fill='x', pady=(2, 0))
-
-        button_font = ctk.CTkFont(size=9, weight='bold')
-
-        self.settings_btn = ctk.CTkButton(btns_row, text='⚙\nSettings', command=self.show_settings,
-            width=65, height=54, fg_color=HEADER_BUTTON_NORMAL_COLOR, hover_color=HEADER_BUTTON_HOVER_COLOR,
-            text_color=HERMES_GOLD, font=button_font, corner_radius=10)
-        self.settings_btn.pack(side='left', padx=(0, 4))
-
-        self.clear_cache_btn = ctk.CTkButton(btns_row, text='✕\nClear\ncache', command=self.clear_cache,
-            width=65, height=54, fg_color=HEADER_BUTTON_NORMAL_COLOR, hover_color='#3a2a00',
-            text_color=HERMES_GOLD, font=button_font, corner_radius=10)
-        self.clear_cache_btn.pack(side='left', padx=(0, 4))
-
-        self.refresh_credits_btn = ctk.CTkButton(btns_row, text=REFRESH_CREDITS_BUTTON_TEXT, command=self.refresh_credits,
-            width=65, height=54, fg_color=HEADER_BUTTON_NORMAL_COLOR, hover_color=HEADER_BUTTON_HOVER_COLOR,
-            text_color=HERMES_GOLD, font=button_font, corner_radius=10)
-        self.refresh_credits_btn.pack(side='left', padx=(0, 4))
-
-        self.refresh_btn = ctk.CTkButton(btns_row, text=REFRESH_LIST_BUTTON_TEXT, command=self.refresh,
-            width=65, height=54, fg_color=HEADER_BUTTON_NORMAL_COLOR, hover_color=HEADER_BUTTON_HOVER_COLOR,
-            text_color=HERMES_GOLD, font=ctk.CTkFont(size=9, weight='bold'), corner_radius=10)
-        self.refresh_btn.pack(side='left')
-
-        self.api_key_btn = ctk.CTkButton(btns_frame, text='API Key', command=self.set_api_key,
-            width=HEADER_BUTTON_GROUP_WIDTH, height=28, fg_color=HEADER_BUTTON_NORMAL_COLOR, hover_color=HEADER_BUTTON_HOVER_COLOR,
-            text_color=HERMES_GOLD, font=ctk.CTkFont(size=11, weight='bold'), corner_radius=8)
-        self.api_key_btn.pack(side='top', pady=(8, 0))
-
-        ctk.CTkFrame(hdr_content, width=8, fg_color='#1a1a1a').pack(side='left', fill='y')
-        ctk.CTkFrame(hdr, height=2, fg_color='#2a2a2a').pack(side='bottom', fill='x')
+    def _resize_banner(self, event):
+        if self._logo_image:
+            original = self._logo_image.cget('dark_image')
+            scale = min(max(1, event.width / self.banner_label._get_widget_scaling() - 4) / original.width, 154 / original.height)
+            size = (max(1, int(original.width * scale)), max(1, int(original.height * scale)))
+            if self._logo_image.cget('size') != size:
+                self._logo_image.configure(size=size)
 
     def _build_search_bar(self):
-        search_frame = ctk.CTkFrame(self.root, height=50, fg_color='#1a1a1a')
-        search_frame.pack(side='top', fill='x', padx=10, pady=(0, 5))
+        search_frame = ctk.CTkFrame(self.root, height=58, fg_color='transparent')
+        search_frame.pack(side='top', fill='x', padx=18, pady=(8, 10))
         search_frame.pack_propagate(False)
-
-        ctk.CTkLabel(search_frame, text='Search:', font=ctk.CTkFont(size=13), text_color='#888888').pack(side='left', padx=(10, 5))
-
         self.search_var = ctk.StringVar()
         self._search_debounce_id = None
         self.search_var.trace_add('write', lambda *_: self._on_search_changed())
+        self.star_filter_btn = ctk.CTkButton(search_frame, text='★  Favorites', width=142, height=52,
+            fg_color=SURFACE, hover_color=HEADER_BUTTON_HOVER_COLOR, text_color=GOLD, border_width=1, border_color=BORDER,
+            font=ctk.CTkFont(size=13), command=self.toggle_star_filter, corner_radius=10)
+        self.star_filter_btn.pack(side='right', padx=(10, 0), pady=3)
+        self.promotion_filter_btn = ctk.CTkButton(search_frame, text='*  Offers', width=105, height=52,
+            fg_color=SURFACE, hover_color=HEADER_BUTTON_HOVER_COLOR, text_color=GREEN, border_width=1, border_color=BORDER,
+            font=ctk.CTkFont(size=13), command=self.toggle_promotion_filter, corner_radius=10)
+        self.promotion_filter_btn.pack(side='right', padx=(10, 0), pady=3)
 
-        search_entry = ctk.CTkEntry(search_frame, textvariable=self.search_var,
-            placeholder_text='Type to filter...', font=ctk.CTkFont(size=13),
-            fg_color='#2a2a2a', border_color='#444444', text_color='white')
-        search_entry.pack(side='left', fill='x', expand=True, padx=5, pady=8)
-        search_entry.bind('<Return>', lambda e: self._trigger_search())
+        self.search_shell = ctk.CTkFrame(search_frame, fg_color=SURFACE, border_width=1, border_color=BORDER, corner_radius=10)
+        self.search_shell.pack(side='left', fill='both', expand=True, pady=3)
+        self._icons['search'] = make_icon('search', 23, TEXT)
+        ctk.CTkLabel(self.search_shell, text='', image=self._icons['search']).pack(side='left', padx=(16, 8))
+        self.search_hint = ctk.CTkLabel(self.search_shell, text='Press  /  to focus', text_color=MUTED, font=ctk.CTkFont(size=11))
+        self.search_hint.pack(side='right', padx=(8, 16))
+        self.clear_search_btn = ctk.CTkButton(self.search_shell, text='×', width=30, height=32,
+            command=self.clear_search, fg_color=SURFACE, hover_color=HEADER_BUTTON_HOVER_COLOR,
+            text_color=MUTED, font=ctk.CTkFont(size=22), corner_radius=6, state='disabled')
+        self.clear_search_btn.pack(side='right', padx=(4, 0))
+        self._tooltips.append(HoverTip(self.clear_search_btn, 'Clear search. Shortcut: Escape.'))
+        self.search_entry = ctk.CTkEntry(self.search_shell, textvariable=self.search_var,
+            font=ctk.CTkFont(size=14), fg_color=SURFACE, border_width=0, text_color=TEXT, corner_radius=0)
+        self.search_entry.pack(side='left', fill='both', expand=True, pady=6)
+        self.search_placeholder = ctk.CTkLabel(self.search_entry, text='Search models, providers, or keywords…',
+            text_color=MUTED, font=ctk.CTkFont(size=14), anchor='w', fg_color=SURFACE)
+        self.search_placeholder.place(x=6, rely=0.5, anchor='w')
+        self.search_placeholder.bind('<Button-1>', self._focus_search)
+        self.search_entry.bind('<Return>', lambda _event: self._trigger_search())
+        self.search_entry.bind('<Escape>', lambda _event: self.clear_search())
+        self.search_entry.bind('<FocusIn>', self._search_focus_in)
+        self.search_entry.bind('<FocusOut>', self._search_focus_out)
 
-        self.star_filter_btn = ctk.CTkButton(search_frame, text='☆', width=32, height=32,
-            fg_color='#2a2a2a', hover_color='#333333', text_color=HERMES_GOLD,
-            font=ctk.CTkFont(size=16), command=self.toggle_star_filter)
-        self.star_filter_btn.pack(side='left', padx=(0, 5), pady=8)
+    def _focus_search(self, event=None):
+        if event and getattr(event, 'keysym', None) == 'slash' and isinstance(self.root.focus_get(), (tk.Entry, tk.Text)):
+            return None
+        self.search_entry.focus_set()
+        return 'break'
+
+    def _search_focus_in(self, _event=None):
+        self.search_shell.configure(border_color=AMBER)
+        self.search_placeholder.place_forget()
+
+    def _search_focus_out(self, _event=None):
+        self.search_shell.configure(border_color=BORDER)
+        if not self.search_var.get():
+            self.search_placeholder.place(x=6, rely=0.5, anchor='w')
+
+    def _on_category_changed(self, label):
+        self.selected_category = self._category_labels.get(label, 'all')
+        config.set('last_category', self.selected_category)
+        self.apply_filter()
+
+    def _update_category_menu(self):
+        self._category_labels = {}
+        for key, name in MODEL_CATEGORIES.items():
+            count = len(self.all_models) if key == 'all' else sum(key in model['output_modalities'] for model in self.all_models)
+            self._category_labels[f'{name}  ({count})'] = key
+        self.category_menu.configure(values=list(self._category_labels))
+        self.category_var.set(next(label for label, key in self._category_labels.items() if key == self.selected_category))
 
     def _build_main_area(self):
         """Build main area with a single-pass canvas renderer."""
-        main = ctk.CTkFrame(self.root, fg_color='#1a1a1a')
-        main.pack(side='top', fill='both', expand=True, padx=10, pady=(5, 10))
-
-        hdr_row = ctk.CTkFrame(main, height=32, fg_color='#252525')
-        hdr_row.pack(side='top', fill='x', pady=(0, 0))
-        hdr_row.pack_propagate(False)
-
-        cols = [
-            ('★', 4, 32, 'star'),
-            ('#', 44, 32, 'idx'),
-            ('Model', 260, 230, 'name'),
-            ('Tokens', 705, 80, 'context'),
-            ('Input / 1M', 779, 92, 'input'),
-            ('Output / 1M', 867, 96, 'output'),
-        ]
+        main = ctk.CTkFrame(self.root, fg_color=SURFACE, border_width=1, border_color=BORDER, corner_radius=12)
+        main.pack(side='top', fill='both', expand=True, padx=18, pady=(0, 6))
+        self.table_header = ctk.CTkFrame(main, height=42, fg_color=SURFACE_RAISED, corner_radius=8)
+        self.table_header.pack(side='top', fill='x', padx=2, pady=(2, 0))
+        self.table_header.pack_propagate(False)
+        self._column_labels = {
+            'star': '★', 'idx': '#', 'name': 'Model', 'provider': 'Provider / ID',
+            'context': 'Tokens', 'input': 'Input / 1M', 'output': 'Output / 1M',
+            'popularity': 'Popularity', 'created': 'Added', 'promotion': 'Offer *',
+        }
         self.header_btns = []
-        for txt, x, w, key in cols:
-            btn = ctk.CTkButton(hdr_row, text=txt,
+        for key, label in self._column_labels.items():
+            btn = ctk.CTkButton(self.table_header, text=label,
                 command=lambda k=key: self.sort_by(k),
-                width=w, height=28, fg_color='#252525', hover_color='#333333',
-                text_color=HERMES_GOLD if key == self.sort_col else 'white',
-                font=ctk.CTkFont(size=11, weight='bold'))
-            btn.place(x=x, y=2)
+                width=60, height=36, fg_color=SURFACE_RAISED, hover_color=HEADER_BUTTON_HOVER_COLOR,
+                text_color=GOLD if key == self.sort_col else TEXT, corner_radius=6,
+                font=ctk.CTkFont(size=11, weight='bold'), anchor='w' if key in ('name', 'provider') else 'center')
             self.header_btns.append((btn, key))
-
-        list_frame = tk.Frame(main, bg='#1a1a1a')
-        list_frame.pack(side='top', fill='both', expand=True)
+            help_text = {
+                'popularity': 'Official OpenRouter popularity rank. Click to change the sort direction.',
+                'created': 'Date added to OpenRouter (UTC). The first click shows the newest models.',
+                'promotion': 'Offers listed by OpenRouter. The first click shows the largest discounts.\n* marks a promotional price.',
+                'input': 'Price per million input tokens, or characters for speech models.\nFor video, transcription and reranking, open › for the full rates.',
+                'output': 'Price per million output tokens. Open › to see media prices and provider details.',
+            }.get(key)
+            if help_text:
+                self._tooltips.append(HoverTip(btn, help_text))
+        self._update_header_sort_state()
+        list_frame = tk.Frame(main, bg=SURFACE)
+        list_frame.pack(side='top', fill='both', expand=True, padx=3, pady=(0, 5))
 
         style = ttk.Style()
         style.theme_use('clam')
         style.configure('CanvasList.Vertical.TScrollbar',
-            background='#222222', troughcolor='#1a1a1a',
-            arrowcolor='#888888', bordercolor='#1a1a1a')
+            background=BORDER, troughcolor=SURFACE,
+            arrowcolor=MUTED, bordercolor=SURFACE, width=12)
 
         self.list_canvas = tk.Canvas(
             list_frame,
-            bg='#1a1a1a',
+            bg=SURFACE,
             highlightthickness=0,
             bd=0,
-            yscrollincrement=30
+            yscrollincrement=34,
+            cursor='hand2'
         )
         self.list_scrollbar = ttk.Scrollbar(
             list_frame,
@@ -823,17 +962,22 @@ class OpenRouterGUI:
         self.list_canvas.bind('<Button-1>', self._on_canvas_click)
         self.list_canvas.bind('<MouseWheel>', self._on_canvas_mousewheel)
         self.list_canvas.bind('<Configure>', lambda _e: self._redraw_if_needed())
+        self.list_canvas.bind('<Motion>', self._on_canvas_motion)
+        self.list_canvas.bind('<Leave>', self._on_canvas_leave)
+        self._row_tooltip = HoverTip(self.list_canvas)
+        self._tooltips.append(self._row_tooltip)
 
     def _build_status_bar(self):
-        self.status_bar = ctk.CTkFrame(self.root, fg_color='transparent', height=18)
-        self.status_bar.pack(side='bottom', fill='x', pady=(3, 0))
+        ctk.CTkFrame(self.root, height=1, fg_color='#594022', corner_radius=0).pack(side='bottom', fill='x')
+        self.status_bar = ctk.CTkFrame(self.root, fg_color='transparent', height=44)
+        self.status_bar.pack(side='bottom', fill='x', padx=22)
         self.status_bar.pack_propagate(False)
-
-        self.status_lbl = ctk.CTkLabel(self.status_bar, text='', font=ctk.CTkFont(size=10), text_color='#666666')
-        self.status_lbl.place(relx=0.5, rely=0.5, anchor='center')
-
-        self.author_lbl = ctk.CTkLabel(self.status_bar, text=APP_AUTHOR, font=ctk.CTkFont(size=10), text_color='#777777')
-        self.author_lbl.place(relx=0.995, rely=0.5, anchor='e')
+        self.status_lbl = ctk.CTkLabel(self.status_bar, text='Loading catalog…', font=ctk.CTkFont(size=12), text_color=MUTED)
+        self.status_lbl.pack(side='left')
+        self.author_lbl = ctk.CTkLabel(self.status_bar, text=f'{APP_NAME} v{APP_VERSION}', font=ctk.CTkFont(size=11), text_color=MUTED)
+        self.author_lbl.pack(side='right')
+        self.connection_lbl = ctk.CTkLabel(self.status_bar, text='●  Cached data    │', font=ctk.CTkFont(size=11), text_color=MUTED)
+        self.connection_lbl.pack(side='right', padx=14)
 
     # ========================================================================
     # IMAGE LOADING
@@ -882,40 +1026,35 @@ class OpenRouterGUI:
         cached = load_cache()
         if cached:
             self.all_models = cached
+            self._models_version += 1
             self._sort_cache_key = None
             self._sort_cache = None
             self._last_render_signature = None
             self._update_header_models_count(len(self.all_models))
-            self.status_lbl.configure(text=f'Cache loaded: {len(self.all_models)} models')
+            self._update_category_menu()
             self.apply_filter()
-            if not API_KEY:
-                self.credits_lbl.configure(text='Credits used: N/A (API key optional)')
-                self.credits_available_lbl.configure(text='Credits remaining: N/A')
         else:
             self.all_models = []
             self._sort_cache_key = None
             self._sort_cache = None
             self._last_render_signature = None
             self._update_header_models_count(None)
-            if API_KEY:
-                self.status_lbl.configure(text='No cache - click Refresh list')
-            else:
-                self.status_lbl.configure(text='No local cache. API key optional for live data.')
-                self.credits_lbl.configure(text='Credits used: N/A (API key optional)')
-                self.credits_available_lbl.configure(text='Credits remaining: N/A')
+            self._update_category_menu()
+            self._draw_empty_state('Loading the OpenRouter catalog…')
+        self.update_credits_display()
         self._refresh_tray_tooltip()
 
         if API_KEY:
             self._submit_background(self._fetch_credits)
-        if API_KEY and not cached:
-            self._submit_background(self._fetch_models_and_cache)
+        # Catalog and modality metadata are public; the key is only needed for credits.
+        self.refresh()
         self._schedule_credits_refresh()
 
     def _fetch_credits(self):
         if not API_KEY:
             self._queue_ui(lambda: (
-                self.credits_lbl.configure(text='Credits used: N/A (API key optional)'),
-                self.credits_available_lbl.configure(text='Credits remaining: N/A'),
+                self.credits_lbl.configure(text='—'),
+                self.credits_available_lbl.configure(text='—'),
                 self._refresh_tray_tooltip()
             ))
             return
@@ -927,18 +1066,7 @@ class OpenRouterGUI:
         self.update_credits_display()
 
     def _fetch_models_and_cache(self):
-        if not API_KEY:
-            self._queue_ui(lambda: self.status_lbl.configure(text='API key not configured. Showing cached data only.'))
-            return
-        self._queue_ui(lambda: self.status_lbl.configure(text='Loading models...'))
-        raw = get_models_from_api()
-        if raw:
-            models = process_models(raw)
-            if not self._is_closing:
-                save_cache(models)
-            self._queue_ui(lambda: self._on_models_loaded(models))
-        else:
-            self._queue_ui(lambda: self.status_lbl.configure(text='Model loading error'))
+        self._do_refresh()
 
     def _on_models_loaded(self, models):
         self.all_models = models
@@ -947,23 +1075,22 @@ class OpenRouterGUI:
         self._sort_cache = None
         self._last_render_signature = None
         self._update_header_models_count(len(models))
-        now = datetime.now().strftime('%H:%M:%S')
-        self.status_lbl.configure(text=f'Updated: {now} ({len(models)} models)')
+        self._update_category_menu()
+        self.is_loading = False
+        self._catalog_live = True
+        if not self.credits_info.get('data'):
+            self._set_connection_state('Catalog live', GREEN)
         self.apply_filter()
         self.refresh_btn.configure(
             state='normal',
             text=REFRESH_LIST_BUTTON_TEXT,
             fg_color=HEADER_BUTTON_NORMAL_COLOR,
             hover_color=HEADER_BUTTON_HOVER_COLOR,
-            text_color=HERMES_GOLD,
+            text_color=TEXT,
         )
 
     def refresh(self):
         if self.is_loading:
-            return
-        if not API_KEY:
-            self.status_lbl.configure(text='API key not configured. Showing cached data only.')
-            self.load_data()
             return
         self.is_loading = True
         self.refresh_btn.configure(
@@ -971,59 +1098,38 @@ class OpenRouterGUI:
             text=REFRESH_LIST_LOADING_TEXT,
             fg_color=HEADER_BUTTON_DISABLED_COLOR,
             hover_color=HEADER_BUTTON_HOVER_COLOR,
-            text_color=HERMES_GOLD,
+            text_color=TEXT,
         )
         self.status_lbl.configure(text='Loading...')
-        self._pending_query = self.search_var.get()
         self._submit_background(self._do_refresh)
 
     def _do_refresh(self):
         try:
             raw = get_models_from_api()
-            credits = get_generation_cost()
         except Exception as e:
             logger.error(f"Refresh failed: {e}")
             raw = []
-            credits = {}
         if raw:
             models = process_models(raw)
             if not self._is_closing:
                 save_cache(models)
-            self._queue_ui(lambda: self._on_all_loaded(models, credits))
+            self._queue_ui(lambda: self._on_models_loaded(models))
         else:
-            self.is_loading = False
-            self._queue_ui(lambda: self.refresh_btn.configure(
-                state='normal',
-                text=REFRESH_LIST_BUTTON_TEXT,
-                fg_color=HEADER_BUTTON_NORMAL_COLOR,
-                hover_color=HEADER_BUTTON_HOVER_COLOR,
-                text_color=HERMES_GOLD,
-            ))
-            self._queue_ui(lambda: self.status_lbl.configure(text='Load error'))
+            self._queue_ui(self._on_catalog_error)
+
+    def _on_catalog_error(self):
+        self.is_loading = False
+        self._catalog_live = False
+        self.refresh_btn.configure(state='normal', text=REFRESH_LIST_BUTTON_TEXT, text_color=TEXT)
+        self._set_connection_state('Offline · cached data', MUTED)
+        self.status_lbl.configure(text='Refresh failed · cached models are still available', text_color=MUTED)
+        if not self.all_models:
+            self._draw_empty_state('Unable to load models. Check your connection and refresh the list.')
 
     def _on_all_loaded(self, models, credits):
-        self.all_models = models
         self.credits_info = credits
-        self._models_version += 1
-        self._sort_cache_key = None
-        self._sort_cache = None
-        self._last_render_signature = None
-        self._update_header_models_count(len(models))
         self.update_credits_display()
-        now = datetime.now().strftime('%H:%M:%S')
-        self.status_lbl.configure(text=f'Updated: {now} ({len(models)} models)')
-        self.apply_filter()
-        self.is_loading = False
-        self.refresh_btn.configure(
-            state='normal',
-            text=REFRESH_LIST_BUTTON_TEXT,
-            fg_color=HEADER_BUTTON_NORMAL_COLOR,
-            hover_color=HEADER_BUTTON_HOVER_COLOR,
-            text_color=HERMES_GOLD,
-        )
-        self._pending_query = ''
-        if config.get('notifications_enabled', True):
-            WindowsUtils.show_notification(APP_NAME, f"Data refreshed: {len(models)} models")
+        self._on_models_loaded(models)
 
     def refresh_data(self):
         self.refresh()
@@ -1039,7 +1145,7 @@ class OpenRouterGUI:
             text=REFRESH_CREDITS_LOADING_TEXT,
             fg_color=HEADER_BUTTON_DISABLED_COLOR,
             hover_color=HEADER_BUTTON_HOVER_COLOR,
-            text_color=HERMES_GOLD,
+            text_color=TEXT,
         )
         self._submit_background(self._do_refresh_credits)
 
@@ -1061,7 +1167,7 @@ class OpenRouterGUI:
             text=REFRESH_CREDITS_BUTTON_TEXT,
             fg_color=HEADER_BUTTON_NORMAL_COLOR,
             hover_color=HEADER_BUTTON_HOVER_COLOR,
-            text_color=HERMES_GOLD,
+            text_color=TEXT,
         )
 
     # ========================================================================
@@ -1071,10 +1177,21 @@ class OpenRouterGUI:
     def _queue_ui(self, callback):
         if self._is_closing:
             return
-        try:
-            self.root.after(0, lambda: None if self._is_closing else callback())
-        except Exception:
-            pass
+        self._ui_queue.put(callback)
+
+    def _drain_ui_queue(self):
+        if self._is_closing:
+            return
+        while True:
+            try:
+                callback = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback()
+            except Exception:
+                logger.exception('UI callback failed')
+        self._ui_poll_id = self.root.after(40, self._drain_ui_queue)
 
     def _submit_background(self, callback, *args):
         if self._is_closing:
@@ -1108,14 +1225,20 @@ class OpenRouterGUI:
     def _update_header_models_count(self, total_models=None):
         if hasattr(self, 'models_count_lbl'):
             if total_models is None:
-                self.models_count_lbl.configure(text='Models: --')
+                self.models_count_lbl.configure(text='—')
             else:
-                self.models_count_lbl.configure(text=f'Models: {total_models}')
+                self.models_count_lbl.configure(text=f'{total_models:,}')
+
+    def _set_connection_state(self, text, color):
+        self._connection_state = text
+        self.connection_lbl.configure(text=f'●  {text}    │', text_color=color)
 
     def update_credits_display(self):
         if not self.credits_info or 'data' not in self.credits_info:
-            self.credits_lbl.configure(text='Credits used: --')
-            self.credits_available_lbl.configure(text='Credits remaining: --')
+            self.credits_lbl.configure(text='—')
+            self.credits_available_lbl.configure(text='—')
+            if API_KEY:
+                self._set_connection_state('API unavailable', MUTED)
             self._refresh_tray_tooltip()
             return
         d = self.credits_info.get('data', {})
@@ -1130,17 +1253,18 @@ class OpenRouterGUI:
             remaining = float(limit) - usage
 
         if limit in (None, 0):
-            self.credits_lbl.configure(text=f'Credits used: ${usage:.2f}')
+            self.credits_lbl.configure(text=f'${usage:.2f}')
             if remaining is None:
-                self.credits_available_lbl.configure(text='Credits remaining: Unlimited')
+                self.credits_available_lbl.configure(text='Unlimited')
             else:
-                self.credits_available_lbl.configure(text=f'Credits remaining: ${float(remaining):.2f}')
+                self.credits_available_lbl.configure(text=f'${float(remaining):.2f}')
         else:
-            self.credits_lbl.configure(text=f'Credits used: ${usage:.2f} / ${float(limit):.2f}')
+            self.credits_lbl.configure(text=f'${usage:.2f} / ${float(limit):.2f}')
             if remaining is None:
-                self.credits_available_lbl.configure(text='Credits remaining: --')
+                self.credits_available_lbl.configure(text='—')
             else:
-                self.credits_available_lbl.configure(text=f'Credits remaining: ${float(remaining):.2f}')
+                self.credits_available_lbl.configure(text=f'${float(remaining):.2f}')
+        self._set_connection_state('API Connected', GREEN)
         self._refresh_tray_tooltip()
 
     # ========================================================================
@@ -1152,7 +1276,7 @@ class OpenRouterGUI:
             self.sort_rev = not self.sort_rev
         else:
             self.sort_col = col
-            self.sort_rev = False
+            self.sort_rev = col in ('created', 'promotion')
         self._update_header_sort_state()
         config.set('last_sort_column', col)
         config.set('last_sort_reverse', self.sort_rev)
@@ -1160,21 +1284,11 @@ class OpenRouterGUI:
 
     def _update_header_sort_state(self):
         for btn, key in self.header_btns:
-            btn.configure(text_color=HERMES_GOLD if key == self.sort_col else 'white')
+            suffix = ('  ↓' if self.sort_rev else '  ↑') if key == self.sort_col else ''
+            btn.configure(text=f'{self._column_labels[key]}{suffix}', text_color=AMBER if key == self.sort_col else TEXT)
 
     def get_sorted(self, models):
-        rev = self.sort_rev
-        if self.sort_col == 'star':
-            return sorted(models, key=lambda x: x['id'] not in self.favorites, reverse=rev)
-        elif self.sort_col == 'name':
-            return sorted(models, key=lambda x: x.get('name_lower') or (x['name'] or '').lower(), reverse=rev)
-        elif self.sort_col == 'context':
-            return sorted(models, key=lambda x: x['context_length'] or 0, reverse=rev)
-        elif self.sort_col == 'input':
-            return sorted(models, key=lambda x: x['input_price'] if x['input_price'] is not None else 999999, reverse=rev)
-        elif self.sort_col == 'output':
-            return sorted(models, key=lambda x: x['output_price'] if x['output_price'] is not None else 999999, reverse=rev)
-        return models
+        return sort_models(models, self.sort_col, self.sort_rev, self.favorites)
 
     def _get_sorted_all(self):
         cache_key = (
@@ -1195,16 +1309,34 @@ class OpenRouterGUI:
 
     def toggle_star_filter(self):
         self.show_only_favorites = not self.show_only_favorites
-        self.star_filter_btn.configure(text='★' if self.show_only_favorites else '☆')
+        self.star_filter_btn.configure(fg_color='#302619' if self.show_only_favorites else SURFACE,
+            border_color=AMBER if self.show_only_favorites else BORDER)
+        self._last_render_signature = None
+        self.apply_filter()
+
+    def toggle_promotion_filter(self):
+        self.show_only_promotions = not self.show_only_promotions
+        self.promotion_filter_btn.configure(fg_color='#102d23' if self.show_only_promotions else SURFACE,
+            border_color=GREEN if self.show_only_promotions else BORDER)
         self._last_render_signature = None
         self.apply_filter()
 
     def _on_search_changed(self):
         if self._is_closing:
             return
+        has_query = bool(self.search_var.get())
+        self.clear_search_btn.configure(state='normal' if has_query else 'disabled', text_color=TEXT if has_query else MUTED)
+        if has_query:
+            self.search_placeholder.place_forget()
+        elif self.root.focus_get() is not self.search_entry._entry:
+            self.search_placeholder.place(x=6, rely=0.5, anchor='w')
         if self._search_debounce_id:
             self.root.after_cancel(self._search_debounce_id)
-        self._search_debounce_id = self.root.after(300, lambda: self.apply_filter())
+        self._search_debounce_id = self.root.after(180, self._debounced_search)
+
+    def _debounced_search(self):
+        self._search_debounce_id = None
+        self.apply_filter()
 
     def _trigger_search(self):
         if self._search_debounce_id:
@@ -1214,23 +1346,19 @@ class OpenRouterGUI:
         self.apply_filter()
 
     def clear_search(self):
+        self.search_var.set('')
         if self._search_debounce_id:
             self.root.after_cancel(self._search_debounce_id)
             self._search_debounce_id = None
-        self.search_var.set('')
+        self._pending_query = ''
         self._last_render_signature = None
         self.apply_filter()
+        self.search_entry.focus_set()
 
     def apply_filter(self):
-        query = self._pending_query if self._pending_query else self.search_var.get()
-        self._pending_query = ''
-        query = query.lower().strip()
-
-        filtered = self._get_sorted_all()
-        if self.show_only_favorites:
-            filtered = [m for m in filtered if m['id'] in self.favorites]
-        if query:
-            filtered = [m for m in filtered if query in (m.get('name_lower') or (m['name'] or '').lower())]
+        query = self.search_var.get().lower().strip()
+        filtered = filter_models(self._get_sorted_all(), query, self.selected_category, self.favorites,
+            self.show_only_favorites, self.show_only_promotions)
 
         filter_state_key = (
             self._models_version,
@@ -1238,6 +1366,8 @@ class OpenRouterGUI:
             self.sort_col,
             self.sort_rev,
             self.show_only_favorites,
+            self.show_only_promotions,
+            self.selected_category,
             query,
         )
         self._filter_state_key = filter_state_key
@@ -1250,16 +1380,9 @@ class OpenRouterGUI:
         self._clear_scroll()
 
         if not filtered:
-            self._draw_empty_state('No favorites' if self.show_only_favorites else 'No models match')
-            self.status_lbl.configure(text='0 models')
-            self.is_loading = False
-            self.refresh_btn.configure(
-                state='normal',
-                text=REFRESH_LIST_BUTTON_TEXT,
-                fg_color=HEADER_BUTTON_NORMAL_COLOR,
-                hover_color=HEADER_BUTTON_HOVER_COLOR,
-                text_color=HERMES_GOLD,
-            )
+            label = 'No matching offers' if self.show_only_promotions else 'No matching favorites' if self.show_only_favorites else 'No models match your filters'
+            self._draw_empty_state(label)
+            self._set_filter_status(0, len(self.all_models), query, 0)
             return
 
         total = len(filtered)
@@ -1267,17 +1390,9 @@ class OpenRouterGUI:
         self._visible_models = filtered
         self._render_rows_chunk(filtered, 0, 0, 0)
         self._set_filter_status(total, total_all, query, total)
-        self.is_loading = False
-        self.refresh_btn.configure(
-            state='normal',
-            text=REFRESH_LIST_BUTTON_TEXT,
-            fg_color=HEADER_BUTTON_NORMAL_COLOR,
-            hover_color=HEADER_BUTTON_HOVER_COLOR,
-            text_color=HERMES_GOLD,
-        )
 
     def _build_render_signature(self, filtered, query):
-        favorites_state = self._favorites_version if (self.show_only_favorites or self.sort_col == 'star') else 0
+        favorites_state = self._favorites_version
         return (
             self._models_version,
             favorites_state,
@@ -1286,19 +1401,30 @@ class OpenRouterGUI:
             self.sort_col,
             self.sort_rev,
             self.show_only_favorites,
+            self.show_only_promotions,
+            self.selected_category,
             query,
         )
 
     def _set_filter_status(self, total, total_all, query, visible_count):
         if self.show_only_favorites:
             text = f'{total} favorites / {total_all} models'
-        elif query:
+        elif query or self.selected_category != 'all' or self.show_only_promotions:
             text = f'{total} / {total_all} models'
         else:
             text = f'{total_all} models total'
-        self.status_lbl.configure(text=text)
+        if self.selected_category != 'all':
+            text += f'  ·  {MODEL_CATEGORIES[self.selected_category]}'
+        if self.show_only_promotions:
+            text += '  ·  Offers'
+        if any(model.get('is_promoted') for model in self._visible_models):
+            text += '  ·  * Promotional price'
+        if self.all_models and not any(model.get('promotion_known') for model in self.all_models):
+            text += '  ·  Offers unavailable'
+        self.status_lbl.configure(text=text, text_color=MUTED)
 
     def _clear_scroll(self):
+        self._row_tooltip.hide()
         self._visible_models = []
         self.list_canvas.delete('all')
         self.list_canvas.configure(scrollregion=(0, 0, self._canvas_table_width, 0))
@@ -1312,36 +1438,98 @@ class OpenRouterGUI:
             return
         self.list_canvas.delete('all')
         self._row_widgets.clear()
+        self._hovered_row = None
         self._visible_models = rows
+        self._layout_columns()
         for row_idx, model in enumerate(rows):
             self._create_model_row(row_idx, model)
         total_height = max(self.list_canvas.winfo_height(), len(rows) * self._canvas_row_height)
         self.list_canvas.configure(scrollregion=(0, 0, self._canvas_table_width, total_height))
 
     def _create_model_row(self, row_idx, model):
-        bg = '#1e1e1e' if row_idx % 2 == 0 else '#252525'
+        bg = '#141a1f' if row_idx % 2 == 0 else '#101519'
         y0 = row_idx * self._canvas_row_height
         y1 = y0 + self._canvas_row_height
         cy = y0 + (self._canvas_row_height / 2)
         row_tags = ('row', f"model::{model['id']}")
-        self.list_canvas.create_rectangle(0, y0, self._canvas_table_width, y1, fill=bg, outline='', tags=row_tags)
+        selected = self._selected_model_id == model['id']
+        background = self.list_canvas.create_rectangle(2, y0 + 1, self._canvas_table_width - 2, y1 - 1,
+            fill='#302215' if selected else bg, outline='#ad6b1b' if selected else '', width=1, tags=row_tags)
+        self.list_canvas.create_line(3, y1, self._canvas_table_width - 3, y1, fill='#242c32', tags=row_tags)
         is_fav = model['id'] in self.favorites
+        center = lambda key: sum(self._column_bounds[key]) / 2
         star_item = self.list_canvas.create_text(
-            20,
+            center('star'),
             cy,
             text='★' if is_fav else '☆',
-            fill=HERMES_GOLD if is_fav else '#555555',
-            font=('Segoe UI Symbol', 14),
+            fill=AMBER if is_fav else MUTED,
+            font=self._table_fonts['star'],
             tags=('row', 'star', f"model::{model['id']}")
         )
-        self.list_canvas.create_text(52, cy, text=str(row_idx + 1), fill='#777777', font=('Segoe UI', 10), tags=row_tags)
-        self.list_canvas.create_text(84, cy, text=model.get('name') or '-', fill='white', font=('Segoe UI', 10, 'bold'), anchor='w', tags=row_tags)
-        self.list_canvas.create_text(670, cy, text=model.get('id') or '-', fill='#A8A8A8', font=('Consolas', 9), anchor='e', tags=row_tags)
-        self.list_canvas.create_text(745, cy, text=model.get('context_text') or '-', fill=model.get('context_color') or NEUTRAL_PRICE_COLOR, font=('Segoe UI', 10), anchor='center', tags=row_tags)
-        self.list_canvas.create_text(825, cy, text=model.get('input_text') or '-', fill=model.get('input_color') or NEUTRAL_PRICE_COLOR, font=('Segoe UI', 10, 'bold'), anchor='center', tags=row_tags)
-        self.list_canvas.create_text(915, cy, text=model.get('output_text') or '-', fill=model.get('output_color') or NEUTRAL_PRICE_COLOR, font=('Segoe UI', 10, 'bold'), anchor='center', tags=row_tags)
+        self.list_canvas.create_text(center('idx'), cy, text=str(row_idx + 1), fill=MUTED, font=self._table_fonts['normal'], tags=row_tags)
+        for key, text, font_key in [('name', model.get('name') or '—', 'name'), ('provider', model['id'], 'id')]:
+            left, right = self._column_bounds[key]
+            self.list_canvas.create_text(left + 6, cy, text=self._ellipsize(text + (' *' if key == 'name' and model.get('is_promoted') else ''),
+                right - left - 12, self._table_fonts[font_key]), fill=TEXT if key == 'name' else MUTED,
+                font=self._table_fonts[font_key], anchor='w', tags=row_tags)
+        for key, text, color, font_key in [
+            ('context', model.get('context_text') or '—', model.get('context_color') or MUTED, 'normal'),
+            ('input', model.get('input_text') or '—', GOLD if model.get('input_price') == 0 else model.get('input_color', MUTED), 'price'),
+            ('output', model.get('output_text') or '—', GOLD if model.get('output_price') == 0 else model.get('output_color', MUTED), 'price'),
+            ('popularity', model.get('popularity_text') or '—', AMBER if model.get('popularity_rank') else MUTED, 'normal'),
+            ('created', model.get('created_text') or '—', TEXT if model.get('created') else MUTED, 'date'),
+            ('promotion', model.get('promotion_text') or '—', GREEN if model.get('is_promoted') else MUTED, 'price'),
+        ]:
+            self.list_canvas.create_text(center(key), cy, text=text, fill=color, font=self._table_fonts[font_key], tags=row_tags)
+        arrow = self.list_canvas.create_text(center('details'), cy, text='›', fill=AMBER if selected else MUTED,
+            font=self._table_fonts['star'], tags=row_tags)
+        self._row_widgets[model['id']] = {'star': star_item, 'background': background, 'bg': bg, 'arrow': arrow}
 
-        self._row_widgets[model['id']] = {'star': star_item}
+    def _layout_columns(self):
+        scale = self.table_header._get_widget_scaling()
+        width = max(1, self.list_canvas.winfo_width())
+        if width <= 1:
+            width = int(1300 * scale)
+        self._canvas_table_width = width
+        self._canvas_row_height = max(24, int(34 * scale))
+        self.list_canvas.configure(yscrollincrement=self._canvas_row_height)
+        widths = {'star': 36, 'idx': 32, 'context': 92, 'input': 96, 'output': 96,
+                  'popularity': 108, 'created': 104, 'promotion': 92, 'details': 24}
+        available = max(120, width / scale - sum(widths.values()))
+        widths['name'] = available * 0.55
+        widths['provider'] = available * 0.45
+        self._column_bounds = {}
+        position = 0
+        for key in ('star', 'idx', 'name', 'provider', 'context', 'input', 'output', 'popularity', 'created', 'promotion', 'details'):
+            right = position + widths[key] * scale
+            self._column_bounds[key] = (position, right)
+            position = right
+        for button, key in self.header_btns:
+            left, right = self._column_bounds[key]
+            button.configure(width=max(1, (right - left) / scale - 2))
+            button.place(x=left / scale, y=3)
+        if getattr(self, '_font_scale', None) != scale:
+            self._font_scale = scale
+            self._table_fonts = {
+                'normal': tkfont.Font(family='Segoe UI', size=-round(13 * scale)),
+                'name': tkfont.Font(family='Segoe UI', size=-round(14 * scale), weight='bold'),
+                'id': tkfont.Font(family='Consolas', size=-round(12 * scale)),
+                'price': tkfont.Font(family='Segoe UI', size=-round(12 * scale), weight='bold'),
+                'date': tkfont.Font(family='Segoe UI', size=-round(12 * scale)),
+                'star': tkfont.Font(family='Segoe UI Symbol', size=-round(24 * scale)),
+            }
+
+    def _ellipsize(self, text, max_width, font):
+        if font.measure(text) <= max_width:
+            return text
+        low, high = 0, len(text)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if font.measure(text[:middle] + '…') <= max_width:
+                low = middle
+            else:
+                high = middle - 1
+        return text[:low] + '…'
 
     def _show_more_rows(self):
         return
@@ -1353,7 +1541,7 @@ class OpenRouterGUI:
             width / 2,
             height / 2,
             text=text,
-            fill='#666666',
+            fill=MUTED,
             font=('Segoe UI', 12)
         )
         self.list_canvas.configure(scrollregion=(0, 0, width, height))
@@ -1361,22 +1549,62 @@ class OpenRouterGUI:
     def _redraw_if_needed(self):
         if self._visible_models:
             self._render_rows_chunk(self._visible_models, 0, 0, 0)
+        else:
+            self._layout_columns()
+
+    def _row_at_event(self, event):
+        index = int(self.list_canvas.canvasy(event.y) // self._canvas_row_height)
+        return index if 0 <= index < len(self._visible_models) else None
+
+    def _paint_row_state(self, index):
+        if index is None or index >= len(self._visible_models):
+            return
+        model = self._visible_models[index]
+        row = self._row_widgets.get(model['id'])
+        if not row:
+            return
+        active = index == self._hovered_row or model['id'] == self._selected_model_id
+        self.list_canvas.itemconfigure(row['background'], fill='#302215' if active else row['bg'], outline='#ad6b1b' if active else '')
+        self.list_canvas.itemconfigure(row['arrow'], fill=AMBER if active else MUTED)
+
+    def _on_canvas_motion(self, event):
+        index = self._row_at_event(event)
+        if index is not None and event.x < self._column_bounds['provider'][1]:
+            model = self._visible_models[index]
+            category_text = ', '.join(MODEL_CATEGORIES.get(key, key.title()) for key in model['output_modalities'])
+            self._row_tooltip.schedule(f"{model['name']}\n{model['id']}\n{category_text}\nClick the row to copy the ID. Use › to open details.", event.x_root, event.y_root)
+        else:
+            self._row_tooltip.hide()
+        if index == self._hovered_row:
+            return
+        previous = self._hovered_row
+        self._hovered_row = index
+        self._paint_row_state(previous)
+        self._paint_row_state(index)
+
+    def _on_canvas_leave(self, _event=None):
+        self._row_tooltip.hide()
+        previous = self._hovered_row
+        self._hovered_row = None
+        self._paint_row_state(previous)
 
     def _on_canvas_click(self, event):
-        item = self.list_canvas.find_withtag('current')
-        if not item:
+        self._row_tooltip.hide()
+        index = self._row_at_event(event)
+        if index is None:
             return
-        tags = self.list_canvas.gettags(item[0])
-        model_id = None
-        for tag in tags:
-            if tag.startswith('model::'):
-                model_id = tag.split('::', 1)[1]
-                break
-        if not model_id:
-            return
-        if 'star' in tags:
+        model_id = self._visible_models[index]['id']
+        if event.x < self._column_bounds['star'][1]:
             self.toggle_favorite(model_id)
             return
+        if event.x >= self._column_bounds['details'][0]:
+            from urllib.parse import quote
+            webbrowser.open(f'https://openrouter.ai/{quote(model_id, safe="/:")}')
+            return
+        previous = next((i for i, model in enumerate(self._visible_models) if model['id'] == self._selected_model_id), None)
+        self._selected_model_id = model_id
+        self._paint_row_state(previous)
+        self._paint_row_state(index)
         self.copy_model_command(model_id)
 
     def _on_canvas_mousewheel(self, event):
@@ -1391,7 +1619,7 @@ class OpenRouterGUI:
                 self.root.after_cancel(self._status_color_reset_id)
             except Exception:
                 pass
-        self._status_color_reset_id = self.root.after(2800, lambda: self.status_lbl.configure(text_color='#666666'))
+        self._status_color_reset_id = self.root.after(2800, lambda: self.status_lbl.configure(text_color=MUTED))
 
     # ========================================================================
     # FAVORITES MANAGEMENT
@@ -1448,7 +1676,7 @@ class OpenRouterGUI:
     def _on_unmap(self, event=None):
         if self._is_closing:
             return
-        if self.root.state() == 'iconic':
+        if self.root.state() == 'iconic' and self._system_tray:
             self.root.withdraw()
 
     def show_window(self):
@@ -1464,15 +1692,22 @@ class OpenRouterGUI:
         self._settings_dialog = SettingsDialog(self, config)
 
     def set_api_key(self):
-        global API_KEY
         key = prompt_for_api_key(self.root)
         if not key:
             return
-        API_KEY = key
-        config.set('api_key', key)
-        self.status_lbl.configure(text='API key saved. Live refresh is now enabled.')
+        self._set_api_key_value(key)
+
+    def _set_api_key_value(self, key):
+        global API_KEY
+        API_KEY = key.strip() or None
+        config.set('api_key', API_KEY or '')
+        self.credits_info = {}
+        self.update_credits_display()
+        if API_KEY:
+            self._submit_background(self._fetch_credits)
+        else:
+            self._set_connection_state('Catalog live' if self._catalog_live else 'Cached data', GREEN if self._catalog_live else MUTED)
         self._refresh_tray_tooltip()
-        self.load_data()
 
     def clear_cache(self):
         if self._is_closing:
@@ -1580,6 +1815,12 @@ class OpenRouterGUI:
         logger.info("Application closing")
         self._is_closing = True
         self.is_loading = False
+        for tooltip in self._tooltips:
+            tooltip.hide()
+
+        if self._ui_poll_id:
+            self.root.after_cancel(self._ui_poll_id)
+            self._ui_poll_id = None
 
         if self._settings_dialog and self._settings_dialog.top.winfo_exists():
             try:
@@ -1655,31 +1896,29 @@ class SettingsDialog:
         self.config = config_manager
         self.top = ctk.CTkToplevel(self.parent)
         self.top.title("Settings")
-        self.top.geometry("470x360")
+        self.top.geometry("500x560")
         self.top.resizable(False, False)
         self.top.transient(self.parent)
         self.top.grab_set()
         self.top.protocol('WM_DELETE_WINDOW', self._on_close_dialog)
         try:
-            icon_path = APP_DIR / 'opr.ico'
+            icon_path = APP_DIR / 'MEDIAS/openrouter-monitor.ico'
             if icon_path.exists():
                 self.top.iconbitmap(str(icon_path))
         except Exception as e:
             logger.debug(f"Failed to set settings icon: {e}")
         self._settings_icon = None
         try:
-            png_icon_path = APP_DIR / 'OPR_ICO.png'
-            if png_icon_path.exists():
-                self._settings_icon = tk.PhotoImage(file=str(png_icon_path))
-                self.top.iconphoto(False, self._settings_icon)
+            if self.app._window_icon:
+                self.top.iconphoto(False, self.app._window_icon)
         except Exception as e:
             logger.debug(f"Failed to set settings iconphoto: {e}")
 
         self._build_ui()
 
         self.top.update_idletasks()
-        x = (self.top.winfo_screenwidth() // 2) - (470 // 2)
-        y = (self.top.winfo_screenheight() // 2) - (360 // 2)
+        x = self.parent.winfo_rootx() + (self.parent.winfo_width() - self.top.winfo_width()) // 2
+        y = self.parent.winfo_rooty() + (self.parent.winfo_height() - self.top.winfo_height()) // 2
         self.top.geometry(f'+{x}+{y}')
         self.top.focus_force()
 
@@ -1694,7 +1933,7 @@ class SettingsDialog:
             self.app.on_settings_closed()
 
     def _build_ui(self):
-        shell = ctk.CTkFrame(self.top, fg_color='#1a1a1a', corner_radius=0)
+        shell = ctk.CTkFrame(self.top, fg_color=BACKGROUND, corner_radius=0)
         shell.pack(fill='both', expand=True)
 
         ctk.CTkFrame(shell, height=4, fg_color=HERMES_ORANGE).pack(fill='x')
@@ -1704,17 +1943,27 @@ class SettingsDialog:
         ctk.CTkLabel(header, text='Settings', font=ctk.CTkFont(size=22, weight='bold'), text_color='white').pack(anchor='w')
         ctk.CTkLabel(
             header,
-            text='Tray, startup and automatic credit refresh.',
+            text='API key, tray, startup and automatic credit refresh.',
             font=ctk.CTkFont(size=12),
             text_color='#9A9A9A'
         ).pack(anchor='w', pady=(2, 0))
 
-        panel = ctk.CTkFrame(shell, fg_color='#222222', corner_radius=14, border_width=1, border_color='#343434')
+        panel = ctk.CTkFrame(shell, fg_color=SURFACE, corner_radius=14, border_width=1, border_color=BORDER)
         panel.pack(fill='both', expand=True, padx=18, pady=(2, 8))
 
         self.auto_start_var = ctk.BooleanVar(value=self.config.get('auto_start', False))
         self.minimize_var = ctk.BooleanVar(value=self.config.get('minimize_to_tray', True))
         self.interval_var = ctk.StringVar(value=str(self.config.get('refresh_interval_minutes', 5)))
+        self.api_key_var = ctk.StringVar(value=API_KEY or '')
+
+        key_card = ctk.CTkFrame(panel, fg_color=SURFACE_RAISED, corner_radius=10)
+        key_card.pack(fill='x', padx=18, pady=(14, 6))
+        ctk.CTkLabel(key_card, text='OpenRouter API key', font=ctk.CTkFont(size=14, weight='bold'), text_color=GOLD).pack(anchor='w', padx=14, pady=(10, 4))
+        self.api_key_entry = ctk.CTkEntry(key_card, textvariable=self.api_key_var, show='•', height=36,
+            fg_color=SURFACE, border_color=BORDER, text_color=TEXT)
+        self.api_key_entry.pack(fill='x', padx=14, pady=(0, 6))
+        ctk.CTkLabel(key_card, text='Used for account credits. Model browsing works without a key.',
+            font=ctk.CTkFont(size=11), text_color=MUTED).pack(anchor='w', padx=14, pady=(0, 10))
 
         toggles = ctk.CTkFrame(panel, fg_color='transparent')
         toggles.pack(fill='x', padx=18, pady=(14, 6))
@@ -1737,7 +1986,7 @@ class SettingsDialog:
             hover_color=HERMES_DARK_ORANGE
         ).pack(anchor='w')
 
-        timer_card = ctk.CTkFrame(panel, fg_color='#262626', corner_radius=12)
+        timer_card = ctk.CTkFrame(panel, fg_color=SURFACE_RAISED, corner_radius=12)
         timer_card.pack(fill='x', padx=18, pady=(8, 8))
         ctk.CTkLabel(
             timer_card,
@@ -1800,6 +2049,8 @@ class SettingsDialog:
             self.config.set('start_minimized', new_auto_start)
             self.config.set('minimize_to_tray', self.minimize_var.get())
             self.config.set('refresh_interval_minutes', int(self.interval_var.get()))
+            if (self.api_key_var.get().strip() or None) != API_KEY:
+                self.app._set_api_key_value(self.api_key_var.get())
 
             self.app.sync_tray_state()
             self.app._schedule_credits_refresh()
@@ -1821,7 +2072,7 @@ def main():
         if API_KEY:
             logger.info("OpenRouter API key loaded")
         else:
-            logger.info("No API key configured; running in cache-only mode")
+            logger.info("No API key configured; public catalog browsing is available")
 
         def except_hook(exctype, value, traceback):
             logger.error("Uncaught exception", exc_info=(exctype, value, traceback))
